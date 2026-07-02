@@ -216,3 +216,10 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Local price data cache
+data/cache/
+streamlit.log
+
+# Local dev-tooling config (not part of the app)
+.claude/
