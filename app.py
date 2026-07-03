@@ -17,14 +17,6 @@ from src import risk
 
 st.set_page_config(page_title="Portfolio Risk & Optimization Engine", layout="wide")
 
-SECTOR_MAP = {
-    "AAPL": "Tech", "MSFT": "Tech", "NVDA": "Tech", "GOOG": "Tech", "GOOGL": "Tech",
-    "META": "Tech", "AMZN": "Consumer Disc.", "TSLA": "Consumer Disc.", "AVGO": "Tech",
-    "JPM": "Financials", "BAC": "Financials", "GS": "Financials", "MS": "Financials",
-    "XOM": "Energy", "CVX": "Energy", "JNJ": "Healthcare", "UNH": "Healthcare",
-    "PG": "Consumer Staples", "KO": "Consumer Staples", "WMT": "Consumer Staples",
-}
-
 
 @st.cache_data(ttl=3600, show_spinner="Pulling prices...")
 def load_prices(tickers: tuple[str, ...], start: str, end: str) -> pd.DataFrame:
@@ -56,8 +48,6 @@ st.sidebar.subheader("Constraints")
 allow_short = st.sidebar.checkbox("Allow short selling", value=False)
 max_weight = st.sidebar.slider("Max weight per stock", 0.10, 1.0, 0.40, 0.05)
 cash_weight = st.sidebar.slider("Cash allocation", 0.0, 0.50, 0.0, 0.05)
-use_sector_cap = st.sidebar.checkbox("Cap sector exposure", value=False)
-sector_cap = st.sidebar.slider("Max sector weight", 0.20, 1.0, 0.60, 0.05) if use_sector_cap else 1.0
 
 st.sidebar.markdown("---")
 st.sidebar.subheader("Backtest")
@@ -79,26 +69,19 @@ prices = load_prices(tickers, str(start_date), str(end_date))
 returns = dt.compute_returns(prices)
 bench_prices = load_benchmark(benchmark_ticker, str(start_date), str(end_date))
 
-sector_map = {t: SECTOR_MAP.get(t, "Other") for t in tickers} if use_sector_cap else None
-constraints = opt.Constraints(
-    allow_short=allow_short,
-    max_weight=max_weight,
-    cash_weight=cash_weight,
-    sector_map=sector_map,
-    sector_cap=sector_cap,
-)
+constraints = opt.Constraints(allow_short=allow_short, max_weight=max_weight, cash_weight=cash_weight)
 
 cov = risk.shrinkage_cov(returns)
 mu = returns.mean()
 
 st.title("Portfolio Risk & Optimization Engine")
 st.caption(
-    "Multi-asset risk system: VaR/CVaR (3 methods), rolling risk, PCA factor decomposition, "
-    "walk-forward backtesting with transaction costs, and an equity-derivatives protective-put overlay."
+    "Multi-asset risk system: VaR/CVaR, rolling risk monitoring, walk-forward backtesting with "
+    "transaction costs, and an equity-derivatives protective-put overlay."
 )
 
-tab_overview, tab_risk, tab_factor, tab_backtest, tab_options = st.tabs(
-    ["Overview", "Risk Metrics", "Factor Attribution", "Backtest Comparison", "Options Overlay"]
+tab_overview, tab_risk, tab_backtest, tab_options = st.tabs(
+    ["Overview", "Risk Metrics", "Backtest Comparison", "Options Overlay"]
 )
 
 # --------------------------------------------------------------------------
@@ -108,8 +91,6 @@ with tab_overview:
     strategy_choice = st.selectbox("Portfolio construction method", bt.STRATEGIES, index=0)
     if strategy_choice == "Equal Weight":
         weights = opt.equal_weight(len(tickers), cash_weight)
-    elif strategy_choice == "Min Variance":
-        weights = opt.min_variance(cov, list(tickers), constraints)
     elif strategy_choice == "Max Sharpe":
         weights = opt.max_sharpe(mu, cov, list(tickers), constraints)
     else:
@@ -141,16 +122,16 @@ with tab_overview:
 with tab_risk:
     port_returns = risk.portfolio_returns(returns, weights)
 
-    st.subheader(f"VaR / CVaR at {int((1-alpha)*100)}% confidence — three methods")
+    st.subheader(f"VaR / CVaR at {int((1-alpha)*100)}% confidence")
+    st.caption("Historical (empirical percentile) vs. Parametric (Normal-distribution assumption) — comparing the two shows how much the Normal assumption understates or overstates tail risk.")
     var_h, cvar_h = risk.var_historical(port_returns, alpha), risk.cvar_historical(port_returns, alpha)
     var_p, cvar_p = risk.var_parametric(port_returns, alpha), risk.cvar_parametric(port_returns, alpha)
-    var_mc, cvar_mc = risk.var_monte_carlo(mu.values, cov.values, weights, alpha)
 
     method_df = pd.DataFrame(
         {
-            "Method": ["Historical", "Parametric", "Monte Carlo"],
-            "VaR (%)": [var_h, var_p, var_mc],
-            "CVaR / ES (%)": [cvar_h, cvar_p, cvar_mc],
+            "Method": ["Historical", "Parametric"],
+            "VaR (%)": [var_h, var_p],
+            "CVaR / ES (%)": [cvar_h, cvar_p],
         }
     )
     method_df["VaR ($)"] = method_df["VaR (%)"] * portfolio_value
@@ -168,36 +149,8 @@ with tab_risk:
     fig5.add_trace(go.Scatter(x=roll.index, y=roll["rolling_vol_annualized"], name="Rolling Ann. Vol"))
     st.plotly_chart(fig5, width='stretch')
 
-    st.subheader("Covariance estimation: sample vs. shrinkage")
-    st.caption("Ledoit-Wolf shrinkage pulls the noisy sample covariance toward a structured target — more stable out-of-sample than raw sample covariance, especially on short windows.")
-    c1, c2 = st.columns(2)
-    with c1:
-        st.markdown("**Sample covariance (annualized)**")
-        st.dataframe(risk.sample_cov(returns, annualize=True).style.format("{:.4f}"))
-    with c2:
-        st.markdown("**Shrinkage covariance (annualized)**")
-        st.dataframe(cov.mul(risk.TRADING_DAYS).style.format("{:.4f}"))
-
-# --------------------------------------------------------------------------
-# Factor Attribution
-# --------------------------------------------------------------------------
-with tab_factor:
-    st.subheader("PCA-based factor risk decomposition")
-    st.caption(
-        "Statistical factor model: PC1 typically captures broad market risk, later PCs capture "
-        "sector/style tilts, and 'Residual' is idiosyncratic risk not explained by common factors."
-    )
-    n_factors = st.slider("Number of factors", 1, min(5, len(tickers) - 1), min(3, len(tickers) - 1))
-    fac = risk.pca_factor_decomposition(returns, weights, n_factors=n_factors)
-    fig6 = go.Figure(data=[go.Bar(x=fac["factor"], y=fac["pct_of_total_risk"] * 100)])
-    fig6.update_layout(yaxis_title="% of total portfolio variance")
-    st.plotly_chart(fig6, width='stretch')
-    st.dataframe(
-        fac.style.format({"variance_contribution": "{:.6f}", "pct_of_total_risk": "{:.1%}", "volatility_contribution_annualized": "{:.2%}"}),
-        width='stretch',
-    )
-
     st.subheader("Risk contribution by asset (current weights)")
+    st.caption("Ledoit-Wolf shrinkage covariance feeds this and every optimizer — it pulls the noisy sample covariance toward a structured target, more stable than raw sample covariance on realistic lookback windows.")
     rc = opt.risk_contributions(weights, cov)
     fig7 = go.Figure(data=[go.Bar(x=rc.index, y=rc.values * 100)])
     fig7.update_layout(yaxis_title="% of total portfolio variance")
@@ -244,13 +197,6 @@ with tab_backtest:
     for c in ["Sharpe", "Sortino", "Calmar"]:
         stats_fmt[c] = stats_fmt[c].map("{:.2f}".format)
     st.dataframe(stats_fmt, width='stretch')
-
-    st.subheader("Efficient frontier (current lookback window)")
-    ef = opt.efficient_frontier(mu, cov, list(tickers), constraints, n_points=20)
-    if len(ef):
-        fig10 = go.Figure(data=go.Scatter(x=ef["volatility"] * 100, y=ef["target_return"] * 100, mode="markers+lines"))
-        fig10.update_layout(xaxis_title="Volatility (%)", yaxis_title="Expected return (%)")
-        st.plotly_chart(fig10, width='stretch')
 
 # --------------------------------------------------------------------------
 # Options Overlay

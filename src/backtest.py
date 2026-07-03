@@ -13,14 +13,12 @@ import pandas as pd
 from . import optimize as opt
 from . import risk
 
-STRATEGIES = ["Equal Weight", "Min Variance", "Max Sharpe", "Risk Parity"]
+STRATEGIES = ["Equal Weight", "Max Sharpe", "Risk Parity"]
 
 
 def _target_weights(strategy: str, mu: pd.Series, cov: pd.DataFrame, tickers: list[str], constraints: opt.Constraints, rf_annual: float) -> np.ndarray:
     if strategy == "Equal Weight":
         return opt.equal_weight(len(tickers), constraints.cash_weight)
-    if strategy == "Min Variance":
-        return opt.min_variance(cov, tickers, constraints)
     if strategy == "Max Sharpe":
         return opt.max_sharpe(mu, cov, tickers, constraints, rf_annual)
     if strategy == "Risk Parity":
@@ -35,7 +33,6 @@ def walk_forward_backtest(
     lookback_days: int = 252,
     cost_bps: float = 5.0,
     constraints: opt.Constraints | None = None,
-    cov_method: str = "shrinkage",
     rf_annual: float = 0.04,
 ) -> dict:
     constraints = constraints or opt.Constraints()
@@ -63,19 +60,10 @@ def walk_forward_backtest(
 
     for i, reb_date in enumerate(rebalance_dates):
         window = returns.loc[:reb_date].tail(lookback_days)
-        cov = risk.shrinkage_cov(window) if cov_method == "shrinkage" else risk.sample_cov(window)
+        cov = risk.shrinkage_cov(window)
         mu = window.mean()
 
-        c = opt.Constraints(
-            allow_short=constraints.allow_short,
-            max_weight=constraints.max_weight,
-            cash_weight=constraints.cash_weight,
-            sector_map=constraints.sector_map,
-            sector_cap=constraints.sector_cap,
-            prev_weights=prev_weights if i > 0 else None,
-            max_turnover=constraints.max_turnover,
-        )
-        weights = _target_weights(strategy, mu, cov, tickers, c, rf_annual)
+        weights = _target_weights(strategy, mu, cov, tickers, constraints, rf_annual)
 
         turnover = float(np.sum(np.abs(weights - prev_weights)))
         cost = turnover * (cost_bps / 10_000)
